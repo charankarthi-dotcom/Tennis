@@ -1,9 +1,12 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime
+import json
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
 
 # ----------------------------
-# Tennis scoring logic (same as before, but shortened for brevity)
+# Tennis scoring logic (full class)
 # ----------------------------
 class TennisMatch:
     def __init__(self, player_a, player_b, best_of=3, ad_scoring=True, tiebreak_points=7, final_set_tiebreak=10, first_server=None):
@@ -13,6 +16,7 @@ class TennisMatch:
         self.ad_scoring = ad_scoring
         self.tiebreak_points = tiebreak_points
         self.final_set_tiebreak = final_set_tiebreak
+        
         self.points = []
         self.current_set = 1
         self.sets_won = {player_a: 0, player_b: 0}
@@ -22,6 +26,7 @@ class TennisMatch:
         self.match_over = False
         self.winner = None
         self.current_server = first_server if first_server else player_a
+        
         self.state_history = []
         
     def _save_state(self):
@@ -121,13 +126,16 @@ class TennisMatch:
     def add_point(self, winner, serve_type1=None, serve_type2=None, serve_outcome=None, return_type=None, rally_length=None, reason=None, winner_detail=None, error_detail=None):
         if self.match_over:
             return False
+        
         if serve_outcome in ["Ace (1st)", "Ace (2nd)", "Missed Return (1st)", "Missed Return (2nd)"]:
             winner = self.current_server
         elif serve_outcome == "Double Fault":
             winner = self.player_b if self.current_server == self.player_a else self.player_a
+        
         self._save_state()
         server = self.current_server
         no_rally = serve_outcome in ["Ace (1st)", "Ace (2nd)", "Missed Return (1st)", "Missed Return (2nd)", "Double Fault"] or return_type == "Winner"
+        
         point_data = {
             'point_number': len(self.points) + 1,
             'server': server,
@@ -148,6 +156,7 @@ class TennisMatch:
             'set_won': None,
             'match_won': None,
         }
+        
         game_won_before = self._is_game_won()
         if not self.tiebreak_active and self.get_point_score_display(server) in ["Deuce", "Deciding Point"]:
             if not self.ad_scoring and self.get_point_score_display(server) == "Deciding Point":
@@ -195,6 +204,7 @@ class TennisMatch:
                     if self.games[self.player_a] == 6 and self.games[self.player_b] == 6:
                         self.tiebreak_active = True
                         self.point_score = {self.player_a: 0, self.player_b: 0}
+        
         point_data['point_score_after'] = self.get_point_score_display(server)
         point_data['game_score_after'] = f"{self.games[self.player_a]}-{self.games[self.player_b]}"
         point_data['set_score_after'] = f"{self.sets_won[self.player_a]}-{self.sets_won[self.player_b]}"
@@ -288,10 +298,117 @@ class TennisMatch:
         return stats
 
 # ----------------------------
-# Streamlit UI – Always visible start button
+# Google Sheets helpers
 # ----------------------------
-st.set_page_config(page_title="Tennis Tracker", layout="wide", initial_sidebar_state="collapsed")
+def get_gsheet_client():
+    """Return gspread client using Streamlit secrets."""
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    # Convert private_key back to proper string (toml may have stripped newlines)
+    if "private_key" in creds_dict:
+        creds_dict["private_key"] = creds_dict["private_key"].replace("\\n", "\n")
+    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+    creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+    return gspread.authorize(creds)
 
+def save_match_to_sheets(match, sheet_url_or_key):
+    """Append match summary and points to Google Sheets."""
+    client = get_gsheet_client()
+    try:
+        # Try to open by key (if it's a 44-char key)
+        sh = client.open_by_key(sheet_url_or_key)
+    except:
+        # Otherwise treat as sheet name
+        sh = client.open(sheet_url_or_key)
+    
+    # Create or get worksheets
+    try:
+        summary_ws = sh.worksheet("Match_Summary")
+    except:
+        summary_ws = sh.add_worksheet("Match_Summary", rows=1000, cols=20)
+        summary_ws.append_row(["Match_ID", "Date", "Player A", "Player B", "Winner", "Sets", "Games", "Total Points"])
+    
+    try:
+        points_ws = sh.worksheet("Points_Detail")
+    except:
+        points_ws = sh.add_worksheet("Points_Detail", rows=10000, cols=30)
+        headers = ["Match_ID", "Point_Number", "Server", "Winner", "Serve_Outcome", "Serve_Type_1st", "Serve_Type_2nd",
+                   "Return_Type", "Rally_Length", "Reason", "Winner_Detail", "Error_Detail",
+                   "Point_Score_Before", "Point_Score_After", "Game_Score_Before", "Game_Score_After", "Set_Score_After"]
+        points_ws.append_row(headers)
+    
+    # Generate unique match ID
+    match_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    score = match.get_current_score()
+    summary_row = [
+        match_id,
+        datetime.now().isoformat(),
+        match.player_a,
+        match.player_b,
+        match.winner if match.winner else "",
+        score['sets'],
+        score['games'],
+        len(match.points)
+    ]
+    summary_ws.append_row(summary_row)
+    
+    for p in match.points:
+        points_row = [
+            match_id,
+            p.get('point_number'),
+            p.get('server'),
+            p.get('winner'),
+            p.get('serve_outcome'),
+            p.get('serve_type_1st'),
+            p.get('serve_type_2nd'),
+            p.get('return_type'),
+            p.get('rally_length'),
+            p.get('reason'),
+            p.get('winner_detail'),
+            p.get('error_detail'),
+            p.get('point_score_before'),
+            p.get('point_score_after'),
+            p.get('game_score_before'),
+            p.get('game_score_after'),
+            p.get('set_score_after'),
+        ]
+        points_ws.append_row(points_row)
+    return match_id
+
+def load_match_history(sheet_url_or_key):
+    """Return DataFrame of all matches from Match_Summary worksheet."""
+    client = get_gsheet_client()
+    try:
+        sh = client.open_by_key(sheet_url_or_key)
+    except:
+        sh = client.open(sheet_url_or_key)
+    try:
+        ws = sh.worksheet("Match_Summary")
+        data = ws.get_all_records()
+        return pd.DataFrame(data)
+    except:
+        return pd.DataFrame()
+
+def load_match_points(sheet_url_or_key, match_id):
+    """Return DataFrame of points for a given match ID."""
+    client = get_gsheet_client()
+    try:
+        sh = client.open_by_key(sheet_url_or_key)
+    except:
+        sh = client.open(sheet_url_or_key)
+    try:
+        ws = sh.worksheet("Points_Detail")
+        all_data = ws.get_all_records()
+        df = pd.DataFrame(all_data)
+        return df[df['Match_ID'] == match_id]
+    except:
+        return pd.DataFrame()
+
+# ----------------------------
+# Streamlit UI
+# ----------------------------
+st.set_page_config(page_title="Tennis Tracker", layout="wide", initial_sidebar_state="expanded")
+
+# Custom CSS for better appearance
 st.markdown("""
 <style>
     .stApp { background-color: #ffffff; font-family: 'Inter', sans-serif; }
@@ -308,90 +425,197 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 st.title("🎾 Tennis Match Tracker")
-st.caption("Live scoring • Advanced analytics • Server‑first score display")
+st.caption("Live scoring • Auto‑save to Google Sheets • Match history")
 
 # Initialize session state
 if 'match' not in st.session_state:
     st.session_state.match = None
 if 'first_serve_fault' not in st.session_state:
     st.session_state.first_serve_fault = False
+if 'last_match_saved' not in st.session_state:
+    st.session_state.last_match_saved = False
+if 'viewing_history' not in st.session_state:
+    st.session_state.viewing_history = False
 
-# ----------------------------
-# Match Setup – always visible in main area
-# ----------------------------
-st.markdown("### 🏟️ Match Setup")
-col_setup1, col_setup2 = st.columns(2)
-with col_setup1:
-    player_a = st.text_input("Player A Name", "Roger Federer")
-    player_b = st.text_input("Player B Name", "Rafael Nadal")
-    first_server = st.radio("Who serves first?", [player_a, player_b], index=0)
-with col_setup2:
-    best_of = st.selectbox("Format", [3, 5], index=0)
-    ad_scoring = st.checkbox("Ad Scoring (deuce)", value=True)
-    tiebreak_pts = st.number_input("Tiebreak points to win", min_value=5, max_value=10, value=7)
-    final_set_tiebreak = st.number_input("Final set tiebreak points", min_value=0, max_value=10, value=10)
+# Get Google Sheet identifier from secrets
+SHEET_ID = st.secrets.get("SHEET_ID", "Tennis Match Tracker")
 
-if st.button("🆕 Start New Match", use_container_width=True):
-    st.session_state.match = TennisMatch(
-        player_a=player_a,
-        player_b=player_b,
-        best_of=best_of,
-        ad_scoring=ad_scoring,
-        tiebreak_points=tiebreak_pts,
-        final_set_tiebreak=final_set_tiebreak,
-        first_server=first_server
-    )
-    st.session_state.first_serve_fault = False
-    st.rerun()
-
-# ----------------------------
-# Main match interface (only if match exists)
-# ----------------------------
-if st.session_state.match:
-    match = st.session_state.match
-    score = match.get_current_score()
-    
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.metric("Point", score['point'])
-    with col2:
-        st.metric("Games", score['games'])
-    with col3:
-        st.metric("Sets", score['sets'])
-    
-    if score['tiebreak']:
-        st.info("⚡ Tiebreak in progress")
-    if score['match_over']:
-        st.success(f"🏆 Match Winner: {score['winner']}")
-    
-    st.markdown("---")
-    st.subheader("📝 Record Next Point")
-    st.write(f"**Server:** {score['current_server']}")
-    
-    # Two-stage serve logic (same as before)
-    if not st.session_state.first_serve_fault:
-        serve_outcome_1st = st.selectbox("First Serve Outcome", [
-            "1st Serve In Play", "Ace (1st)", "Missed Return (1st)", "Fault"
-        ], key="first_serve")
-        
-        if serve_outcome_1st == "Fault":
-            if st.button("📌 Second Serve", use_container_width=True):
-                st.session_state.first_serve_fault = True
+# Sidebar for match history
+with st.sidebar:
+    st.markdown("### 📚 Match History")
+    if st.button("🔄 Refresh History", use_container_width=True):
+        st.rerun()
+    history_df = load_match_history(SHEET_ID)
+    if not history_df.empty:
+        match_options = history_df.apply(lambda row: f"{row['Match_ID']} - {row['Player A']} vs {row['Player B']} ({row['Winner']})", axis=1)
+        selected_idx = st.selectbox("Select a past match to view", range(len(match_options)), format_func=lambda i: match_options.iloc[i])
+        if st.button("📖 Load Match", use_container_width=True):
+            match_id = history_df.iloc[selected_idx]['Match_ID']
+            points_df = load_match_points(SHEET_ID, match_id)
+            if not points_df.empty:
+                st.session_state.viewing_history = True
+                st.session_state.history_points = points_df
+                st.session_state.history_match_id = match_id
                 st.rerun()
+            else:
+                st.error("Could not load match points.")
+    else:
+        st.caption("No matches saved yet. Complete a match and it will appear here.")
+
+# Main area
+if st.session_state.viewing_history:
+    st.subheader(f"📜 Past Match: {st.session_state.history_match_id}")
+    points_df = st.session_state.history_points
+    st.dataframe(points_df, use_container_width=True)
+    if st.button("← Back to Live Match", use_container_width=True):
+        st.session_state.viewing_history = False
+        st.rerun()
+else:
+    # Match setup (always visible)
+    st.markdown("### 🏟️ Match Setup")
+    col_setup1, col_setup2 = st.columns(2)
+    with col_setup1:
+        player_a = st.text_input("Player A Name", "Roger Federer")
+        player_b = st.text_input("Player B Name", "Rafael Nadal")
+        first_server = st.radio("Who serves first?", [player_a, player_b], index=0)
+    with col_setup2:
+        best_of = st.selectbox("Format", [3, 5], index=0)
+        ad_scoring = st.checkbox("Ad Scoring (deuce)", value=True)
+        tiebreak_pts = st.number_input("Tiebreak points to win", min_value=5, max_value=10, value=7)
+        final_set_tiebreak = st.number_input("Final set tiebreak points", min_value=0, max_value=10, value=10)
+    
+    if st.button("🆕 Start New Match", use_container_width=True):
+        st.session_state.match = TennisMatch(
+            player_a=player_a,
+            player_b=player_b,
+            best_of=best_of,
+            ad_scoring=ad_scoring,
+            tiebreak_points=tiebreak_pts,
+            final_set_tiebreak=final_set_tiebreak,
+            first_server=first_server
+        )
+        st.session_state.first_serve_fault = False
+        st.session_state.last_match_saved = False
+        st.rerun()
+    
+    # If a match is active, show the interface
+    if st.session_state.match:
+        match = st.session_state.match
+        score = match.get_current_score()
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Point", score['point'])
+        with col2:
+            st.metric("Games", score['games'])
+        with col3:
+            st.metric("Sets", score['sets'])
+        
+        if score['tiebreak']:
+            st.info("⚡ Tiebreak in progress")
+        if score['match_over']:
+            st.success(f"🏆 Match Winner: {score['winner']}")
+            if not st.session_state.last_match_saved:
+                if st.button("💾 Save Match to History", use_container_width=True):
+                    try:
+                        match_id = save_match_to_sheets(match, SHEET_ID)
+                        st.session_state.last_match_saved = True
+                        st.success(f"Match saved with ID: {match_id}")
+                    except Exception as e:
+                        st.error(f"Error saving to Google Sheets: {e}")
+                else:
+                    st.info("Match finished! Click 'Save Match to History' to store it permanently.")
+        
+        st.markdown("---")
+        st.subheader("📝 Record Next Point")
+        st.write(f"**Server:** {score['current_server']}")
+        
+        # Two-stage serve logic
+        if not st.session_state.first_serve_fault:
+            serve_outcome_1st = st.selectbox("First Serve Outcome", [
+                "1st Serve In Play", "Ace (1st)", "Missed Return (1st)", "Fault"
+            ], key="first_serve")
+            
+            if serve_outcome_1st == "Fault":
+                if st.button("📌 Second Serve", use_container_width=True):
+                    st.session_state.first_serve_fault = True
+                    st.rerun()
+            else:
+                serve_outcome = serve_outcome_1st
+                if serve_outcome in ["Ace (1st)", "Missed Return (1st)"]:
+                    forced_winner = score['current_server']
+                    winner_disabled = True
+                    st.info(f"Winner automatically set to: **{forced_winner}**")
+                    winner = forced_winner
+                else:
+                    winner_disabled = False
+                    winner = st.radio("Point Winner", [match.player_a, match.player_b], index=0, horizontal=True, key="winner_radio")
+                
+                with st.expander("🔍 Point Details (optional)", expanded=False):
+                    serve_type1 = st.selectbox("1st Serve Type", ["", "Flat Wide", "Slice Wide", "Flat T", "Slice T", "Body Flat", "Body Kick", "Kick Wide", "Kick T"])
+                    no_rally_serve = serve_outcome in ["Ace (1st)", "Missed Return (1st)"]
+                    return_type = st.selectbox("Return Type", ["", "Deep", "Short", "Winner", "Forced Error", "Unforced Error"], disabled=no_rally_serve)
+                    no_rally_return = (return_type == "Winner")
+                    rally_disabled = no_rally_serve or no_rally_return
+                    rally_length = st.selectbox("Rally Length", ["", "1-4", "5-8", "9+ shots"], disabled=rally_disabled)
+                    if rally_disabled:
+                        st.caption("Rally length disabled because point ended on serve winner or return winner.")
+                    reason = st.selectbox("Reason Point Ended", ["", "Winner", "Unforced Error", "Forced Error"], disabled=no_rally_serve)
+                    winner_detail = None
+                    error_detail = None
+                    if reason == "Winner" and not no_rally_serve:
+                        winner_detail = st.selectbox("Winner Detail", ["", "Forehand", "Attack Forehand", "Backhand", "Attack Backhand", "Smash", "Volley", "Drop Shot"])
+                    elif reason in ["Unforced Error", "Forced Error"] and not no_rally_serve:
+                        error_detail = st.selectbox("Error Detail", ["", "Long forehand", "Wide forehand", "Net forehand", "Backhand Long", "Backhand Wide", "Backhand net", "Smash Net", "Smash long", "Smash Wide", "Volley Net", "Volley long", "Volley Wide", "Slice Long", "Slice Wide", "Slice Net", "Drop Net", "Drop wide"])
+                
+                if st.button("✅ Next Point", use_container_width=True):
+                    if not serve_outcome:
+                        st.warning("Please select a serve outcome")
+                    elif not winner_disabled and not winner:
+                        st.warning("Please select a winner")
+                    else:
+                        success = match.add_point(
+                            winner=winner,
+                            serve_type1=serve_type1 if serve_type1 else None,
+                            serve_type2=None,
+                            serve_outcome=serve_outcome,
+                            return_type=return_type if return_type else None,
+                            rally_length=rally_length if rally_length else None,
+                            reason=reason if reason else None,
+                            winner_detail=winner_detail if winner_detail else None,
+                            error_detail=error_detail if error_detail else None
+                        )
+                        if success:
+                            st.success(f"Point recorded: {winner} won the point")
+                            st.session_state.first_serve_fault = False
+                            st.rerun()
+                        else:
+                            st.error("Match is already over!")
         else:
-            serve_outcome = serve_outcome_1st
-            if serve_outcome in ["Ace (1st)", "Missed Return (1st)"]:
+            # Second serve
+            serve_outcome_2nd = st.selectbox("Second Serve Outcome", [
+                "2nd Serve In Play", "Ace (2nd)", "Missed Return (2nd)", "Double Fault"
+            ], key="second_serve")
+            
+            serve_outcome = serve_outcome_2nd
+            if serve_outcome in ["Ace (2nd)", "Missed Return (2nd)"]:
                 forced_winner = score['current_server']
                 winner_disabled = True
                 st.info(f"Winner automatically set to: **{forced_winner}**")
                 winner = forced_winner
+            elif serve_outcome == "Double Fault":
+                forced_winner = match.player_b if score['current_server'] == match.player_a else match.player_a
+                winner_disabled = True
+                st.info(f"Winner automatically set to: **{forced_winner}** (Double Fault)")
+                winner = forced_winner
             else:
                 winner_disabled = False
-                winner = st.radio("Point Winner", [match.player_a, match.player_b], index=0, horizontal=True, key="winner_radio")
+                winner = st.radio("Point Winner", [match.player_a, match.player_b], index=0, horizontal=True, key="winner_radio_2nd")
             
             with st.expander("🔍 Point Details (optional)", expanded=False):
-                serve_type1 = st.selectbox("1st Serve Type", ["", "Flat Wide", "Slice Wide", "Flat T", "Slice T", "Body Flat", "Body Kick", "Kick Wide", "Kick T"])
-                no_rally_serve = serve_outcome in ["Ace (1st)", "Missed Return (1st)"]
+                serve_type1 = st.selectbox("1st Serve Type (missed)", ["", "Flat Wide", "Slice Wide", "Flat T", "Slice T", "Body Flat", "Body Kick", "Kick Wide", "Kick T"])
+                serve_type2 = st.selectbox("2nd Serve Type", ["", "Flat Wide", "Slice Wide", "Flat T", "Slice T", "Body Flat", "Body Kick", "Kick Wide", "Kick T"])
+                no_rally_serve = serve_outcome in ["Ace (2nd)", "Missed Return (2nd)", "Double Fault"]
                 return_type = st.selectbox("Return Type", ["", "Deep", "Short", "Winner", "Forced Error", "Unforced Error"], disabled=no_rally_serve)
                 no_rally_return = (return_type == "Winner")
                 rally_disabled = no_rally_serve or no_rally_return
@@ -406,143 +630,83 @@ if st.session_state.match:
                 elif reason in ["Unforced Error", "Forced Error"] and not no_rally_serve:
                     error_detail = st.selectbox("Error Detail", ["", "Long forehand", "Wide forehand", "Net forehand", "Backhand Long", "Backhand Wide", "Backhand net", "Smash Net", "Smash long", "Smash Wide", "Volley Net", "Volley long", "Volley Wide", "Slice Long", "Slice Wide", "Slice Net", "Drop Net", "Drop wide"])
             
-            if st.button("✅ Next Point", use_container_width=True):
-                if not serve_outcome:
-                    st.warning("Please select a serve outcome")
-                elif not winner_disabled and not winner:
-                    st.warning("Please select a winner")
-                else:
-                    success = match.add_point(
-                        winner=winner,
-                        serve_type1=serve_type1 if serve_type1 else None,
-                        serve_type2=None,
-                        serve_outcome=serve_outcome,
-                        return_type=return_type if return_type else None,
-                        rally_length=rally_length if rally_length else None,
-                        reason=reason if reason else None,
-                        winner_detail=winner_detail if winner_detail else None,
-                        error_detail=error_detail if error_detail else None
-                    )
-                    if success:
-                        st.success(f"Point recorded: {winner} won the point")
-                        st.session_state.first_serve_fault = False
-                        st.rerun()
+            col_btn1, col_btn2 = st.columns(2)
+            with col_btn1:
+                if st.button("✅ Next Point", use_container_width=True):
+                    if not serve_outcome:
+                        st.warning("Please select a serve outcome")
+                    elif not winner_disabled and not winner:
+                        st.warning("Please select a winner")
                     else:
-                        st.error("Match is already over!")
-    else:
-        serve_outcome_2nd = st.selectbox("Second Serve Outcome", [
-            "2nd Serve In Play", "Ace (2nd)", "Missed Return (2nd)", "Double Fault"
-        ], key="second_serve")
+                        success = match.add_point(
+                            winner=winner,
+                            serve_type1=serve_type1 if serve_type1 else None,
+                            serve_type2=serve_type2 if serve_type2 else None,
+                            serve_outcome=serve_outcome,
+                            return_type=return_type if return_type else None,
+                            rally_length=rally_length if rally_length else None,
+                            reason=reason if reason else None,
+                            winner_detail=winner_detail if winner_detail else None,
+                            error_detail=error_detail if error_detail else None
+                        )
+                        if success:
+                            st.success(f"Point recorded: {winner} won the point")
+                            st.session_state.first_serve_fault = False
+                            st.rerun()
+                        else:
+                            st.error("Match is already over!")
+            with col_btn2:
+                if st.button("↩️ Back to First Serve", use_container_width=True):
+                    st.session_state.first_serve_fault = False
+                    st.rerun()
         
-        serve_outcome = serve_outcome_2nd
-        if serve_outcome in ["Ace (2nd)", "Missed Return (2nd)"]:
-            forced_winner = score['current_server']
-            winner_disabled = True
-            st.info(f"Winner automatically set to: **{forced_winner}**")
-            winner = forced_winner
-        elif serve_outcome == "Double Fault":
-            forced_winner = match.player_b if score['current_server'] == match.player_a else match.player_a
-            winner_disabled = True
-            st.info(f"Winner automatically set to: **{forced_winner}** (Double Fault)")
-            winner = forced_winner
-        else:
-            winner_disabled = False
-            winner = st.radio("Point Winner", [match.player_a, match.player_b], index=0, horizontal=True, key="winner_radio_2nd")
-        
-        with st.expander("🔍 Point Details (optional)", expanded=False):
-            serve_type1 = st.selectbox("1st Serve Type (missed)", ["", "Flat Wide", "Slice Wide", "Flat T", "Slice T", "Body Flat", "Body Kick", "Kick Wide", "Kick T"])
-            serve_type2 = st.selectbox("2nd Serve Type", ["", "Flat Wide", "Slice Wide", "Flat T", "Slice T", "Body Flat", "Body Kick", "Kick Wide", "Kick T"])
-            no_rally_serve = serve_outcome in ["Ace (2nd)", "Missed Return (2nd)", "Double Fault"]
-            return_type = st.selectbox("Return Type", ["", "Deep", "Short", "Winner", "Forced Error", "Unforced Error"], disabled=no_rally_serve)
-            no_rally_return = (return_type == "Winner")
-            rally_disabled = no_rally_serve or no_rally_return
-            rally_length = st.selectbox("Rally Length", ["", "1-4", "5-8", "9+ shots"], disabled=rally_disabled)
-            if rally_disabled:
-                st.caption("Rally length disabled because point ended on serve winner or return winner.")
-            reason = st.selectbox("Reason Point Ended", ["", "Winner", "Unforced Error", "Forced Error"], disabled=no_rally_serve)
-            winner_detail = None
-            error_detail = None
-            if reason == "Winner" and not no_rally_serve:
-                winner_detail = st.selectbox("Winner Detail", ["", "Forehand", "Attack Forehand", "Backhand", "Attack Backhand", "Smash", "Volley", "Drop Shot"])
-            elif reason in ["Unforced Error", "Forced Error"] and not no_rally_serve:
-                error_detail = st.selectbox("Error Detail", ["", "Long forehand", "Wide forehand", "Net forehand", "Backhand Long", "Backhand Wide", "Backhand net", "Smash Net", "Smash long", "Smash Wide", "Volley Net", "Volley long", "Volley Wide", "Slice Long", "Slice Wide", "Slice Net", "Drop Net", "Drop wide"])
-        
-        col_btn1, col_btn2 = st.columns(2)
-        with col_btn1:
-            if st.button("✅ Next Point", use_container_width=True):
-                if not serve_outcome:
-                    st.warning("Please select a serve outcome")
-                elif not winner_disabled and not winner:
-                    st.warning("Please select a winner")
-                else:
-                    success = match.add_point(
-                        winner=winner,
-                        serve_type1=serve_type1 if serve_type1 else None,
-                        serve_type2=serve_type2 if serve_type2 else None,
-                        serve_outcome=serve_outcome,
-                        return_type=return_type if return_type else None,
-                        rally_length=rally_length if rally_length else None,
-                        reason=reason if reason else None,
-                        winner_detail=winner_detail if winner_detail else None,
-                        error_detail=error_detail if error_detail else None
-                    )
-                    if success:
-                        st.success(f"Point recorded: {winner} won the point")
-                        st.session_state.first_serve_fault = False
-                        st.rerun()
-                    else:
-                        st.error("Match is already over!")
-        with col_btn2:
-            if st.button("↩️ Back to First Serve", use_container_width=True):
-                st.session_state.first_serve_fault = False
+        if st.button("↩️ Undo Last Point", use_container_width=True):
+            if match.undo_last_point():
+                st.success("Last point undone")
                 st.rerun()
-    
-    if st.button("↩️ Undo Last Point", use_container_width=True):
-        if match.undo_last_point():
-            st.success("Last point undone")
-            st.rerun()
-        else:
-            st.warning("No point to undo")
-    
-    st.markdown("---")
-    st.subheader("📊 Advanced Match Statistics")
-    if match.points:
-        stats = match.get_statistics()
-        col_a, col_b = st.columns(2)
-        for col, player in [(col_a, match.player_a), (col_b, match.player_b)]:
-            with col:
-                st.markdown(f"### {player}")
-                p = stats[player]
-                st.markdown("**Serving**")
-                st.write(f"1st Serve %: {p['first_serve_pct']:.1%}")
-                st.write(f"1st Serve Points Won: {p['first_serve_won_pct']:.1%}")
-                st.write(f"**2nd Serve Points Won: {p['second_serve_won_pct']:.1%}**")
-                st.write(f"Aces: {p['aces']}  |  Double Faults: {p['double_faults']}")
-                st.write(f"Service Games Won: {p['service_games_won_pct']:.1%}")
-                st.write(f"Break Points Saved: {p['break_points_saved_pct']:.1%}")
-                st.markdown("**Return**")
-                st.write(f"Return Points Won: {p['return_points_won_pct']:.1%}")
-                st.write(f"  vs 1st Serve: {p['return_vs_1st_pct']:.1%}")
-                st.write(f"  vs 2nd Serve: {p['return_vs_2nd_pct']:.1%}")
-                st.write(f"Break Points Converted: {p['break_points_converted_pct']:.1%}")
-                st.write(f"Return Games Won: {p['return_games_won_pct']:.1%}")
-                st.markdown("**Rally & Point**")
-                st.write(f"Total Points Won: {p['total_points_won_pct']:.1%}")
-                st.write(f"Winners: {p['winners']}  |  Unforced Errors: {p['unforced_errors']}")
-                st.write("Rally Length Distribution:")
-                for length, pct in p['rally_patterns'].items():
-                    st.write(f"  {length}: {pct:.1%}")
-    else:
-        st.info("No points recorded yet. Add points to see statistics.")
-    
-    with st.expander("📜 Point History"):
+            else:
+                st.warning("No point to undo")
+        
+        # Statistics
+        st.markdown("---")
+        st.subheader("📊 Advanced Match Statistics")
         if match.points:
-            df = pd.DataFrame(match.points)
-            display_cols = ['point_number', 'server', 'winner', 'serve_outcome', 'serve_type_1st', 'serve_type_2nd', 'return_type', 'rally_length', 'reason', 'winner_detail', 'error_detail', 'point_score_before', 'point_score_after', 'game_score_after']
-            st.dataframe(df[display_cols], use_container_width=True)
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("📥 Download CSV", csv, f"tennis_match_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "text/csv")
+            stats = match.get_statistics()
+            col_a, col_b = st.columns(2)
+            for col, player in [(col_a, match.player_a), (col_b, match.player_b)]:
+                with col:
+                    st.markdown(f"### {player}")
+                    p = stats[player]
+                    st.markdown("**Serving**")
+                    st.write(f"1st Serve %: {p['first_serve_pct']:.1%}")
+                    st.write(f"1st Serve Points Won: {p['first_serve_won_pct']:.1%}")
+                    st.write(f"**2nd Serve Points Won: {p['second_serve_won_pct']:.1%}**")
+                    st.write(f"Aces: {p['aces']}  |  Double Faults: {p['double_faults']}")
+                    st.write(f"Service Games Won: {p['service_games_won_pct']:.1%}")
+                    st.write(f"Break Points Saved: {p['break_points_saved_pct']:.1%}")
+                    st.markdown("**Return**")
+                    st.write(f"Return Points Won: {p['return_points_won_pct']:.1%}")
+                    st.write(f"  vs 1st Serve: {p['return_vs_1st_pct']:.1%}")
+                    st.write(f"  vs 2nd Serve: {p['return_vs_2nd_pct']:.1%}")
+                    st.write(f"Break Points Converted: {p['break_points_converted_pct']:.1%}")
+                    st.write(f"Return Games Won: {p['return_games_won_pct']:.1%}")
+                    st.markdown("**Rally & Point**")
+                    st.write(f"Total Points Won: {p['total_points_won_pct']:.1%}")
+                    st.write(f"Winners: {p['winners']}  |  Unforced Errors: {p['unforced_errors']}")
+                    st.write("Rally Length Distribution:")
+                    for length, pct in p['rally_patterns'].items():
+                        st.write(f"  {length}: {pct:.1%}")
         else:
-            st.write("No points yet.")
-else:
-    st.info("👆 Set up the match above and click 'Start New Match'")
+            st.info("No points recorded yet. Add points to see statistics.")
+        
+        with st.expander("📜 Point History"):
+            if match.points:
+                df = pd.DataFrame(match.points)
+                display_cols = ['point_number', 'server', 'winner', 'serve_outcome', 'serve_type_1st', 'serve_type_2nd', 'return_type', 'rally_length', 'reason', 'winner_detail', 'error_detail', 'point_score_before', 'point_score_after', 'game_score_after']
+                st.dataframe(df[display_cols], use_container_width=True)
+                csv = df.to_csv(index=False).encode('utf-8')
+                st.download_button("📥 Download CSV", csv, f"tennis_match_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv", "text/csv")
+            else:
+                st.write("No points yet.")
+    else:
+        st.info("👆 Set up the match above and click 'Start New Match'")
