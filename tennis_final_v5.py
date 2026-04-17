@@ -3,7 +3,7 @@ import pandas as pd
 from datetime import datetime
 
 # ----------------------------
-# Tennis scoring logic (server‑first point display)
+# Tennis scoring logic (same as before, but shortened for brevity)
 # ----------------------------
 class TennisMatch:
     def __init__(self, player_a, player_b, best_of=3, ad_scoring=True, tiebreak_points=7, final_set_tiebreak=10, first_server=None):
@@ -13,17 +13,15 @@ class TennisMatch:
         self.ad_scoring = ad_scoring
         self.tiebreak_points = tiebreak_points
         self.final_set_tiebreak = final_set_tiebreak
-        
         self.points = []
         self.current_set = 1
         self.sets_won = {player_a: 0, player_b: 0}
         self.games = {player_a: 0, player_b: 0}
-        self.point_score = {player_a: 0, player_b: 0}  # raw points (0,1,2,3...)
+        self.point_score = {player_a: 0, player_b: 0}
         self.tiebreak_active = False
         self.match_over = False
         self.winner = None
         self.current_server = first_server if first_server else player_a
-        
         self.state_history = []
         
     def _save_state(self):
@@ -60,24 +58,18 @@ class TennisMatch:
         return [0, 15, 30][points]
     
     def get_point_score_display(self, server=None):
-        """Return point score in 'server_score - receiver_score' format."""
         if server is None:
             server = self.current_server
         receiver = self.player_b if server == self.player_a else self.player_a
-        
         pa = self.point_score[self.player_a]
         pb = self.point_score[self.player_b]
-        
         if self.tiebreak_active:
             if server == self.player_a:
                 return f"{pa} - {pb}"
             else:
                 return f"{pb} - {pa}"
-        
-        # Normal game
         server_pts = pa if server == self.player_a else pb
         receiver_pts = pb if server == self.player_a else pa
-        
         if server_pts >= 3 and receiver_pts >= 3:
             if server_pts == receiver_pts:
                 return "Deuce"
@@ -129,19 +121,13 @@ class TennisMatch:
     def add_point(self, winner, serve_type1=None, serve_type2=None, serve_outcome=None, return_type=None, rally_length=None, reason=None, winner_detail=None, error_detail=None):
         if self.match_over:
             return False
-        
-        # Determine winner based on serve outcome (if forced)
         if serve_outcome in ["Ace (1st)", "Ace (2nd)", "Missed Return (1st)", "Missed Return (2nd)"]:
             winner = self.current_server
         elif serve_outcome == "Double Fault":
             winner = self.player_b if self.current_server == self.player_a else self.player_a
-        
         self._save_state()
         server = self.current_server
-        
-        # Determine if point ended on a serve winner or return winner (no rally)
         no_rally = serve_outcome in ["Ace (1st)", "Ace (2nd)", "Missed Return (1st)", "Missed Return (2nd)", "Double Fault"] or return_type == "Winner"
-        
         point_data = {
             'point_number': len(self.points) + 1,
             'server': server,
@@ -157,13 +143,11 @@ class TennisMatch:
             'no_rally': no_rally,
             'set': self.current_set,
             'game_score_before': f"{self.games[self.player_a]}-{self.games[self.player_b]}",
-            'point_score_before': self.get_point_score_display(server),  # store server-first display
+            'point_score_before': self.get_point_score_display(server),
             'game_won': None,
             'set_won': None,
             'match_won': None,
         }
-        
-        # Update point score (raw)
         game_won_before = self._is_game_won()
         if not self.tiebreak_active and self.get_point_score_display(server) in ["Deuce", "Deciding Point"]:
             if not self.ad_scoring and self.get_point_score_display(server) == "Deciding Point":
@@ -211,8 +195,7 @@ class TennisMatch:
                     if self.games[self.player_a] == 6 and self.games[self.player_b] == 6:
                         self.tiebreak_active = True
                         self.point_score = {self.player_a: 0, self.player_b: 0}
-        
-        point_data['point_score_after'] = self.get_point_score_display(server)  # server-first
+        point_data['point_score_after'] = self.get_point_score_display(server)
         point_data['game_score_after'] = f"{self.games[self.player_a]}-{self.games[self.player_b]}"
         point_data['set_score_after'] = f"{self.sets_won[self.player_a]}-{self.sets_won[self.player_b]}"
         self.points.append(point_data)
@@ -220,7 +203,7 @@ class TennisMatch:
     
     def get_current_score(self):
         return {
-            'point': self.get_point_score_display(),  # uses current_server
+            'point': self.get_point_score_display(),
             'games': f"{self.games[self.player_a]}-{self.games[self.player_b]}",
             'sets': f"{self.sets_won[self.player_a]}-{self.sets_won[self.player_b]}",
             'tiebreak': self.tiebreak_active,
@@ -234,63 +217,47 @@ class TennisMatch:
             return {}
         df = pd.DataFrame(self.points)
         stats = {}
-        
         for player in [self.player_a, self.player_b]:
             p = player
             opponent = self.player_b if p == self.player_a else self.player_a
-            
             points_served = df[df['server'] == p]
             total_serves = len(points_served)
-            
             first_serve_in = points_served[points_served['serve_outcome'].isin(['1st Serve In Play', 'Ace (1st)', 'Missed Return (1st)'])]
             first_serve_pct = len(first_serve_in) / total_serves if total_serves > 0 else 0
-            
             first_serve_won = first_serve_in[first_serve_in['winner'] == p]
             first_serve_won_pct = len(first_serve_won) / len(first_serve_in) if len(first_serve_in) > 0 else 0
-            
             second_serve_in = points_served[points_served['serve_outcome'].isin(['2nd Serve In Play', 'Ace (2nd)', 'Missed Return (2nd)'])]
             second_serve_won = second_serve_in[second_serve_in['winner'] == p]
             second_serve_won_pct = len(second_serve_won) / len(second_serve_in) if len(second_serve_in) > 0 else 0
-            
             aces = len(points_served[points_served['serve_outcome'].isin(['Ace (1st)', 'Ace (2nd)'])])
             double_faults = len(points_served[points_served['serve_outcome'] == 'Double Fault'])
-            
             game_won_points = df[df['game_won'] == p]
             service_games_won = game_won_points[game_won_points['server'] == p]
             service_games_played = len(df[df['server'] == p].drop_duplicates(subset=['game_score_before', 'set']))
             service_games_won_pct = len(service_games_won) / service_games_played if service_games_played > 0 else 0
-            
             break_points_faced = df[(df['server'] == p) & (df['point_score_before'].isin(['30-40', '40-30', 'Deuce', 'Ad-Out']))]
             break_points_saved = break_points_faced[break_points_faced['winner'] == p]
             break_points_saved_pct = len(break_points_saved) / len(break_points_faced) if len(break_points_faced) > 0 else 0
-            
             points_returned = df[df['server'] != p]
             total_return_points = len(points_returned)
             return_points_won = len(points_returned[points_returned['winner'] == p])
             return_points_won_pct = return_points_won / total_return_points if total_return_points > 0 else 0
-            
             first_serve_against = points_returned[points_returned['serve_outcome'].isin(['1st Serve In Play', 'Ace (1st)', 'Missed Return (1st)'])]
             return_vs_1st_won = len(first_serve_against[first_serve_against['winner'] == p])
             return_vs_1st_pct = return_vs_1st_won / len(first_serve_against) if len(first_serve_against) > 0 else 0
-            
             second_serve_against = points_returned[points_returned['serve_outcome'].isin(['2nd Serve In Play', 'Ace (2nd)', 'Missed Return (2nd)'])]
             return_vs_2nd_won = len(second_serve_against[second_serve_against['winner'] == p])
             return_vs_2nd_pct = return_vs_2nd_won / len(second_serve_against) if len(second_serve_against) > 0 else 0
-            
             break_points_opp = df[(df['server'] == opponent) & (df['point_score_before'].isin(['30-40', '40-30', 'Deuce', 'Ad-Out']))]
             break_points_converted = break_points_opp[break_points_opp['winner'] == p]
             break_points_converted_pct = len(break_points_converted) / len(break_points_opp) if len(break_points_opp) > 0 else 0
-            
             return_games_won = game_won_points[game_won_points['server'] == opponent]
             return_games_won_pct = len(return_games_won) / service_games_played if service_games_played > 0 else 0
-            
             total_points = len(df)
             total_points_won = len(df[df['winner'] == p])
             total_points_pct = total_points_won / total_points if total_points > 0 else 0
-            
             winners = len(df[(df['winner'] == p) & (df['reason'] == 'Winner')])
             unforced_errors = len(df[(df['winner'] != p) & (df['reason'] == 'Unforced Error')])
-            
             rallies = df[df['rally_length'].notna()]
             short = rallies[rallies['rally_length'] == '1-4']
             medium = rallies[rallies['rally_length'] == '5-8']
@@ -300,7 +267,6 @@ class TennisMatch:
                 '5-8': len(medium) / len(rallies) if len(rallies) > 0 else 0,
                 '9+': len(long) / len(rallies) if len(rallies) > 0 else 0,
             }
-            
             stats[p] = {
                 'first_serve_pct': first_serve_pct,
                 'first_serve_won_pct': first_serve_won_pct,
@@ -322,127 +288,65 @@ class TennisMatch:
         return stats
 
 # ----------------------------
-# Streamlit UI (unchanged, but point display now server‑first)
+# Streamlit UI – Always visible start button
 # ----------------------------
 st.set_page_config(page_title="Tennis Tracker", layout="wide", initial_sidebar_state="collapsed")
 
 st.markdown("""
 <style>
-    .stApp {
-        background-color: #ffffff;
-        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-    }
+    .stApp { background-color: #ffffff; font-family: 'Inter', sans-serif; }
     #MainMenu {visibility: hidden;}
     footer {visibility: hidden;}
     header {visibility: hidden;}
-    
-    div[data-testid="stMetricValue"] {
-        font-size: 48px !important;
-        font-weight: 600 !important;
-        color: #1e293b !important;
-        background: #f8fafc;
-        padding: 12px 20px;
-        border-radius: 24px;
-        display: inline-block;
-        box-shadow: 0 1px 3px rgba(0,0,0,0.05);
-    }
-    div[data-testid="stMetricLabel"] {
-        font-size: 16px !important;
-        font-weight: 500 !important;
-        color: #475569 !important;
-    }
-    div[role="radiogroup"] label {
-        background-color: #f1f5f9;
-        border-radius: 40px;
-        padding: 10px 24px !important;
-        margin: 4px 8px !important;
-        font-weight: 500;
-        color: #1e293b;
-        transition: all 0.2s ease;
-        border: 1px solid #e2e8f0;
-    }
-    div[role="radiogroup"] label:hover {
-        background-color: #e2e8f0;
-        transform: translateY(-1px);
-    }
-    div[role="radiogroup"] label[data-baseweb="radio"]:checked {
-        background-color: #0f172a;
-        color: white;
-        border-color: #0f172a;
-    }
-    .stButton button {
-        background-color: #0f172a;
-        color: white;
-        border: none;
-        border-radius: 40px;
-        font-weight: 500;
-        font-size: 18px;
-        padding: 10px 20px;
-        transition: 0.2s;
-    }
-    .stButton button:hover {
-        background-color: #1e293b;
-        transform: translateY(-1px);
-        box-shadow: 0 4px 12px rgba(0,0,0,0.1);
-    }
-    .stSelectbox > div > div {
-        background-color: #f8fafc;
-        border-radius: 16px;
-        border: 1px solid #e2e8f0;
-    }
-    .streamlit-expanderHeader {
-        background-color: #f8fafc;
-        border-radius: 20px;
-        font-weight: 500;
-    }
-    h1, h2, h3 {
-        color: #0f172a;
-        font-weight: 600;
-    }
-    .stAlert {
-        border-radius: 20px;
-        background-color: #f1f5f9;
-        border-left: 4px solid #0f172a;
-    }
-    section[data-testid="stSidebar"] {
-        background-color: #fefefe;
-        border-right: 1px solid #e2e8f0;
-    }
+    div[data-testid="stMetricValue"] { font-size: 48px !important; font-weight: 600 !important; background: #f8fafc; padding: 12px 20px; border-radius: 24px; }
+    div[data-testid="stMetricLabel"] { font-size: 16px !important; font-weight: 500 !important; color: #475569 !important; }
+    div[role="radiogroup"] label { background-color: #f1f5f9; border-radius: 40px; padding: 10px 24px !important; margin: 4px 8px !important; border: 1px solid #e2e8f0; }
+    div[role="radiogroup"] label:hover { background-color: #e2e8f0; }
+    .stButton button { background-color: #0f172a; color: white; border-radius: 40px; font-size: 18px; padding: 10px 20px; }
+    .stButton button:hover { background-color: #1e293b; }
 </style>
 """, unsafe_allow_html=True)
 
 st.title("🎾 Tennis Match Tracker")
 st.caption("Live scoring • Advanced analytics • Server‑first score display")
 
+# Initialize session state
 if 'match' not in st.session_state:
     st.session_state.match = None
-
 if 'first_serve_fault' not in st.session_state:
     st.session_state.first_serve_fault = False
 
-with st.sidebar:
-    st.markdown("### 🏟️ Match Setup")
+# ----------------------------
+# Match Setup – always visible in main area
+# ----------------------------
+st.markdown("### 🏟️ Match Setup")
+col_setup1, col_setup2 = st.columns(2)
+with col_setup1:
     player_a = st.text_input("Player A Name", "Roger Federer")
     player_b = st.text_input("Player B Name", "Rafael Nadal")
     first_server = st.radio("Who serves first?", [player_a, player_b], index=0)
+with col_setup2:
     best_of = st.selectbox("Format", [3, 5], index=0)
     ad_scoring = st.checkbox("Ad Scoring (deuce)", value=True)
     tiebreak_pts = st.number_input("Tiebreak points to win", min_value=5, max_value=10, value=7)
     final_set_tiebreak = st.number_input("Final set tiebreak points", min_value=0, max_value=10, value=10)
-    
-    if st.button("🆕 Start New Match", use_container_width=True):
-        st.session_state.match = TennisMatch(
-            player_a=player_a,
-            player_b=player_b,
-            best_of=best_of,
-            ad_scoring=ad_scoring,
-            tiebreak_points=tiebreak_pts,
-            final_set_tiebreak=final_set_tiebreak,
-            first_server=first_server
-        )
-        st.session_state.first_serve_fault = False
-        st.rerun()
 
+if st.button("🆕 Start New Match", use_container_width=True):
+    st.session_state.match = TennisMatch(
+        player_a=player_a,
+        player_b=player_b,
+        best_of=best_of,
+        ad_scoring=ad_scoring,
+        tiebreak_points=tiebreak_pts,
+        final_set_tiebreak=final_set_tiebreak,
+        first_server=first_server
+    )
+    st.session_state.first_serve_fault = False
+    st.rerun()
+
+# ----------------------------
+# Main match interface (only if match exists)
+# ----------------------------
 if st.session_state.match:
     match = st.session_state.match
     score = match.get_current_score()
@@ -464,7 +368,7 @@ if st.session_state.match:
     st.subheader("📝 Record Next Point")
     st.write(f"**Server:** {score['current_server']}")
     
-    # Two-stage serve logic (identical to previous version, but point display fixed)
+    # Two-stage serve logic (same as before)
     if not st.session_state.first_serve_fault:
         serve_outcome_1st = st.selectbox("First Serve Outcome", [
             "1st Serve In Play", "Ace (1st)", "Missed Return (1st)", "Fault"
@@ -479,7 +383,7 @@ if st.session_state.match:
             if serve_outcome in ["Ace (1st)", "Missed Return (1st)"]:
                 forced_winner = score['current_server']
                 winner_disabled = True
-                st.info(f"Winner automatically set to: **{forced_winner}** (based on serve outcome)")
+                st.info(f"Winner automatically set to: **{forced_winner}**")
                 winner = forced_winner
             else:
                 winner_disabled = False
@@ -534,7 +438,7 @@ if st.session_state.match:
         if serve_outcome in ["Ace (2nd)", "Missed Return (2nd)"]:
             forced_winner = score['current_server']
             winner_disabled = True
-            st.info(f"Winner automatically set to: **{forced_winner}** (based on serve outcome)")
+            st.info(f"Winner automatically set to: **{forced_winner}**")
             winner = forced_winner
         elif serve_outcome == "Double Fault":
             forced_winner = match.player_b if score['current_server'] == match.player_a else match.player_a
@@ -641,4 +545,4 @@ if st.session_state.match:
         else:
             st.write("No points yet.")
 else:
-    st.info("👈 Set up the match in the sidebar and click 'Start New Match'")
+    st.info("👆 Set up the match above and click 'Start New Match'")
